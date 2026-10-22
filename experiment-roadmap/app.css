@@ -68,6 +68,15 @@ body { margin: 0; }
 .rm-cell:hover .rm-paste, .rm-paste:focus-visible { opacity: 1; }
 .rm-paste:hover { color: var(--ink); border-style: solid; }
 .rm-editform .rm-addform-actions button:first-child { flex: 0 1 auto; padding: 0 8px; }
+
+/* Repeat fields in the add-step form and step editor */
+.rm-repeat { display: flex; flex-direction: column; gap: 5px; }
+.rm-repeat-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-2); }
+.rm-addform .rm-repeat-row input { flex: 1; min-width: 0; }
+.rm-addform .rm-repeat-row input[type="number"] { flex: 0 0 56px; }
+.rm-addform .rm-later input[type="checkbox"] { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.rm-later { cursor: pointer; line-height: 1.3; }
+.rm-repeat-note { font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; color: var(--muted); }
 .rm-exp-name input { width: 100%; font: inherit; font-weight: 600; border: 1px solid var(--border-strong); border-radius: var(--radius-xs); padding: 1px 4px; background: var(--bg-surface); user-select: text; -webkit-user-select: text; }
 .rm-exp-name { cursor: text; }
 .rm-plan-input, .rm-addform input { user-select: text; -webkit-user-select: text; }

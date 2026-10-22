@@ -5,7 +5,12 @@
 (function () {
   'use strict';
   var R = window.React, h = R.createElement, RM = window.Roadmap, U = RM.utils;
-  var N_DAYS = 14;
+  var N_DAYS = 14;        // days in the export picker
+  var RANGE_LEAD = 28;    // days rendered before this week's Monday on load
+  var RANGE_INITIAL = 112;
+  var RANGE_CHUNK = 28;   // days added when you scroll near either end
+  var RANGE_MAX = 224;    // beyond this, days far off the other side are dropped
+  var RANGE_EDGE = 10;    // extend when fewer than this many days remain past the edge of the view
   var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var MONL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -148,6 +153,11 @@
             s.error = 'offline'; s.flushing = false; emit(); schedule(s.retryIn);
             return;
           }
+          if (ok === true) {
+            // Keep the saved change visible until the database's own snapshot arrives with it.
+            var o = {}; o[it.doc] = merge(s.server[it.doc] || {}, it.patch, false);
+            s.server = Object.assign({}, s.server, o);
+          }
           s.outbox.shift(); s.retryIn = 0;
           if (ok === true && s.error === 'offline') s.error = null;
           persist(); step();
@@ -209,22 +219,95 @@
     return { start: start, docs: docs, patch: patch, info: info, subscribe: function (f) { subs.push(f); } };
   })();
 
+  // ---------- repeats ----------
+  // A repeat rule makes one ordinary step per date, linked by a shared `series` id.
+  var REPEAT_OPTIONS = [
+    ['none', 'Doesn’t repeat'], ['1', 'Every day'], ['weekdays', 'Every weekday (Mon–Fri)'], ['2', 'Every 2 days'],
+    ['3', 'Every 3 days'], ['7', 'Every week'], ['14', 'Every 2 weeks'], ['28', 'Every 4 weeks'], ['custom', 'Every N days…']
+  ];
+  var MAX_REPEATS = 366;
+  function defaultRepeat(start) { return { mode: 'none', n: 5, until: U.shiftIso(start, 27) }; }
+  // Dates after `start` (exclusive) up to `until` (inclusive).
+  function repeatDates(start, r) {
+    if (!r || r.mode === 'none' || !r.until || r.until <= start) return [];
+    var step = r.mode === 'weekdays' ? 1 : r.mode === 'custom' ? Math.max(1, Math.min(365, parseInt(r.n, 10) || 1)) : +r.mode;
+    var out = [], d = start;
+    while (out.length < MAX_REPEATS) {
+      d = U.shiftIso(d, step);
+      if (d > r.until) break;
+      if (r.mode === 'weekdays') { var wd = U.fromIso(d).getDay(); if (wd === 0 || wd === 6) continue; }
+      out.push(d);
+    }
+    return out;
+  }
+  function RepeatFields(props) {
+    var r = props.value;
+    var set = function (patch) { props.onChange(Object.assign({}, r, patch)); };
+    var n = repeatDates(props.start, r).length;
+    return h('div', { className: 'rm-repeat' },
+      h('select', { value: r.mode, 'aria-label': 'Repeat', onChange: function (e) { set({ mode: e.target.value }); } },
+        REPEAT_OPTIONS.map(function (o) { return h('option', { key: o[0], value: o[0] }, o[1]); })),
+      r.mode === 'custom' ? h('label', { className: 'rm-repeat-row' }, 'Every',
+        h('input', { type: 'number', min: 1, max: 365, value: r.n, 'aria-label': 'Repeat every how many days', onChange: function (e) { set({ n: e.target.value }); } }), 'days') : null,
+      r.mode !== 'none' ? h('label', { className: 'rm-repeat-row' }, 'Until',
+        h('input', { type: 'date', value: r.until, min: U.shiftIso(props.start, 1), 'aria-label': 'Repeat until', onChange: function (e) { set({ until: e.target.value }); } })) : null,
+      r.mode !== 'none' ? h('div', { className: 'rm-repeat-note' },
+        n ? '+' + n + (n === 1 ? ' repeat' : ' repeats') + ' after ' + U.shortDate(props.start) : 'Pick an end date after ' + U.shortDate(props.start)) : null);
+  }
+
+  // ---------- daily note ----------
+  // One day's steps grouped by category (legend order, "No category" last); within a category,
+  // steps of the same experiment sit together. Returns the DailyNote sections and the copyable text.
+  function dailyByCategory(date, dayPlans, exps, cats, catMap, notes) {
+    var expOrder = {};
+    exps.forEach(function (e, i) { expOrder[e.id] = i; });
+    var em = {};
+    exps.forEach(function (e) { em[e.id] = e; });
+    var sections = cats.map(function (c) {
+      var items = dayPlans.filter(function (p) { return (catMap[p.cat] ? p.cat : 'none') === c.id; });
+      items.sort(function (a, b) { return ((expOrder[a.exp] || 0) - (expOrder[b.exp] || 0)) || (a.id < b.id ? -1 : 1); });
+      return { id: c.id, title: c.name, items: items };
+    }).filter(function (sec) { return sec.items.length; });
+    var lines = [U.longDate(date)];
+    sections.forEach(function (sec) {
+      lines.push('', sec.title.toUpperCase());
+      sec.items.forEach(function (p) {
+        var e = em[p.exp] || {};
+        lines.push((p.done ? '[x] ' : '[ ] ') + p.text + (e.desk || !e.name ? '' : ' — ' + e.name));
+      });
+    });
+    var note = ((notes || {})[date] || '').trim();
+    if (note) lines.push('', 'NOTES', note);
+    return { sections: sections, done: dayPlans.filter(function (p) { return p.done; }).length, total: dayPlans.length, text: lines.join('\n') };
+  }
+
   // ---------- small pieces ----------
-  // Inline editor for one step: text, category, delete. Replaces the step row while open.
+  // Inline editor for one step: text, category, repeat, delete. Replaces the step row while open.
+  // `later` = how many later steps of the same repeat series exist; the checkbox applies edits and deletes to them too.
   function StepEditor(props) {
-    var t = R.useState(props.plan.text), c = R.useState(props.plan.cat || 'none');
-    var report = function (text, cat) { props.onDraft({ text: text, cat: cat }); };
+    var p = props.plan;
+    // The draft lives in a ref so Save/Delete always see the latest values, plus state to re-render.
+    var ref = R.useRef(null);
+    if (!ref.current) ref.current = { text: p.text, cat: p.cat || 'none', repeat: defaultRepeat(p.date), later: false };
+    var force = R.useState(0)[1];
+    var set = function (patch) { ref.current = Object.assign({}, ref.current, patch); props.onDraft(ref.current); force(function (n) { return n + 1; }); };
+    var d = ref.current;
+    var save = function () { props.onSave(ref.current); };
     return h('div', { className: 'rm-addform rm-editform', onPointerDown: stop, onDoubleClick: stop },
       h('input', {
-        autoFocus: true, value: t[0], 'aria-label': 'Step text',
-        onChange: function (e) { t[1](e.target.value); report(e.target.value, c[0]); },
-        onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); props.onSave(t[0], c[0]); } else if (e.key === 'Escape') props.onCancel(); }
+        autoFocus: true, value: d.text, 'aria-label': 'Step text',
+        onChange: function (e) { set({ text: e.target.value }); },
+        onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); save(); } else if (e.key === 'Escape') props.onCancel(); }
       }),
-      h('select', { value: c[0], 'aria-label': 'Category', onChange: function (e) { c[1](e.target.value); report(t[0], e.target.value); } }, props.options),
+      h('select', { value: d.cat, 'aria-label': 'Category', onChange: function (e) { set({ cat: e.target.value }); } }, props.options),
+      h(RepeatFields, { start: p.date, value: d.repeat, onChange: function (v) { set({ repeat: v }); } }),
+      props.later ? h('label', { className: 'rm-repeat-row rm-later' },
+        h('input', { type: 'checkbox', checked: d.later, onChange: function (e) { set({ later: e.target.checked }); } }),
+        'Also change the ' + props.later + ' later ' + (props.later === 1 ? 'repeat' : 'repeats')) : null,
       h('div', { className: 'rm-addform-actions' },
-        h('button', { type: 'button', onClick: props.onDelete }, 'Delete'),
+        h('button', { type: 'button', onClick: function () { props.onDelete(ref.current.later); } }, 'Delete'),
         h('button', { type: 'button', onClick: props.onCancel }, 'Cancel'),
-        h('button', { type: 'button', className: 'is-go', onClick: function () { props.onSave(t[0], c[0]); } }, 'Save')));
+        h('button', { type: 'button', className: 'is-go', onClick: save }, 'Save')));
   }
 
   function Seg(props) {
@@ -239,16 +322,21 @@
   class App extends R.Component {
     constructor(props) {
       super(props);
-      var t = todayIso();
+      var t = todayIso(), monday = U.mondayOf(t);
       this.state = {
-        data: derive(store.docs()), sync: store.info(), today: t, start: U.mondayOf(t), focus: t,
-        sel: [], drag: null, adding: null, draft: '', draftCat: 'tc',
+        data: derive(store.docs()), sync: store.info(), today: t, focus: t,
+        // The grid renders days [rangeStart, rangeStart + rangeDays) and grows as you scroll toward either end.
+        rangeStart: U.shiftIso(monday, -RANGE_LEAD), rangeDays: RANGE_INITIAL,
+        viewStart: monday, viewEnd: U.shiftIso(monday, 13),
+        sel: [], drag: null, adding: null, draft: '', draftCat: 'tc', draftRepeat: defaultRepeat(t),
         editing: null, colorFor: null, catFilter: null, newCat: '', renaming: null, confirmDel: null, clip: null,
         ghost: [], ghostName: '', copied: false, xcopied: false,
         exportMode: false, exportDays: [], liveW: null, toast: null, canDownload: !window.claude
       };
       this.localW = U.loadColumnWidths();
       this.editingRef = null; this.renamingRef = null;
+      this.leftIdx = RANGE_LEAD; // scroll position, in days from rangeStart
+      this.pendingScrollTo = RANGE_LEAD;
     }
     componentDidMount() {
       var self = this;
@@ -257,10 +345,15 @@
       this._cancel = function () { if (self.state.drag) self.setState({ drag: null }); };
       this._down = function (e) { self.blankDown(e); };
       this._key = function (e) { self.onKey(e); };
+      this._copy = function (e) { self.onCopyEvent(e); };
+      this._paste = function (e) { self.onPasteEvent(e); };
       window.addEventListener('pointerup', this._up);
       window.addEventListener('pointercancel', this._cancel);
       window.addEventListener('pointerdown', this._down, true);
       window.addEventListener('keydown', this._key);
+      document.addEventListener('copy', this._copy);
+      document.addEventListener('paste', this._paste);
+      this.applyScroll();
       this._tick = setInterval(function () {
         var t = todayIso();
         if (t !== self.state.today) self.setState(function (st) { return { today: t, focus: st.focus === st.today ? t : st.focus }; });
@@ -275,12 +368,15 @@
       window.removeEventListener('pointercancel', this._cancel);
       window.removeEventListener('pointerdown', this._down, true);
       window.removeEventListener('keydown', this._key);
+      document.removeEventListener('copy', this._copy);
+      document.removeEventListener('paste', this._paste);
       clearInterval(this._tick); clearTimeout(this._ct); clearTimeout(this._xt); clearTimeout(this._tt);
     }
 
     // ---------- writes ----------
     writePlan(next, prev) {
       var p = { id: next.id, exp: next.exp, date: next.date, text: next.text, cat: next.cat, done: !!next.done };
+      if (next.series) p.series = next.series;
       if (prev && monthKey(prev.date) !== monthKey(p.date)) {
         var gone = {}; gone[prev.id] = null;
         store.patch('plans-' + monthKey(prev.date), { plans: gone });
@@ -387,22 +483,92 @@
       if (st.confirmDel) next.confirmDel = null;
       if (Object.keys(next).length) this.setState(next);
     }
+    // ---------- endless timeline ----------
+    // The grid holds a sliding range of days. Scrolling near either end adds RANGE_CHUNK days there
+    // (and drops days far off the other side), shifting scrollLeft so the view does not jump.
+    applyScroll() {
+      var el = this.scrollEl, w = this.widths().day;
+      if (!el) return;
+      if (this.pendingScrollTo != null) {
+        el.scrollLeft = this.pendingScrollTo * w; this.leftIdx = this.pendingScrollTo; this.pendingScrollTo = null;
+      } else if (this.pendingShift) {
+        el.scrollLeft += this.pendingShift * w; this.leftIdx += this.pendingShift;
+      } else if (this.lastDayW && this.lastDayW !== w) {
+        el.scrollLeft = this.leftIdx * w; // keep the same first day in view while column widths change
+      }
+      this.pendingShift = 0; this.lastDayW = w; this.extending = false;
+      this.onScroll();
+    }
+    componentDidUpdate() { this.applyScroll(); }
+    onScroll() {
+      var el = this.scrollEl, st = this.state;
+      if (!el) return;
+      var w = this.widths();
+      this.leftIdx = el.scrollLeft / w.day;
+      var visible = Math.max(1, (el.clientWidth - w.name) / w.day);
+      var vs = U.shiftIso(st.rangeStart, Math.floor(this.leftIdx + 0.02));
+      var ve = U.shiftIso(st.rangeStart, Math.max(0, Math.ceil(this.leftIdx + visible - 0.02) - 1));
+      if (vs !== st.viewStart || ve !== st.viewEnd) this.setState({ viewStart: vs, viewEnd: ve });
+      if (this.extending) return;
+      if (this.leftIdx < RANGE_EDGE) {
+        this.extending = true;
+        var trimRight = st.rangeDays + RANGE_CHUNK > RANGE_MAX ? RANGE_CHUNK : 0;
+        this.pendingShift = RANGE_CHUNK;
+        this.setState({ rangeStart: U.shiftIso(st.rangeStart, -RANGE_CHUNK), rangeDays: st.rangeDays + RANGE_CHUNK - trimRight });
+      } else if (this.leftIdx + visible > st.rangeDays - RANGE_EDGE) {
+        this.extending = true;
+        var trimLeft = st.rangeDays + RANGE_CHUNK > RANGE_MAX && this.leftIdx > RANGE_CHUNK + RANGE_EDGE ? RANGE_CHUNK : 0;
+        this.pendingShift = -trimLeft;
+        this.setState({ rangeStart: U.shiftIso(st.rangeStart, trimLeft), rangeDays: st.rangeDays + RANGE_CHUNK - trimLeft });
+      }
+    }
+    // Bring `date` to the left edge of the grid.
+    scrollToDate(date, smooth) {
+      var st = this.state, el = this.scrollEl, idx = U.dayDiff(st.rangeStart, date);
+      if (!el || idx < RANGE_EDGE || idx > st.rangeDays - 2 * RANGE_EDGE) {
+        this.pendingScrollTo = RANGE_LEAD;
+        this.setState({ rangeStart: U.shiftIso(date, -RANGE_LEAD), rangeDays: RANGE_INITIAL });
+        return;
+      }
+      if (smooth && el.scrollTo) el.scrollTo({ left: idx * this.widths().day, behavior: 'smooth' });
+      else el.scrollLeft = idx * this.widths().day;
+    }
+
+    // ---------- keyboard and clipboard ----------
     onKey(e) {
       var t = e.target, st = this.state;
       if (t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
       var mod = e.metaKey || e.ctrlKey;
+      // Match the physical key too, so shortcuts work with any keyboard layout or input method.
+      var isKey = function (ch) { return e.code === 'Key' + ch || (e.key || '').toUpperCase() === ch; };
       if (e.key === 'Escape') {
         this.setState({ sel: [], ghost: [], colorFor: null, confirmDel: null, adding: null });
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && st.sel.length) {
         e.preventDefault(); this.deleteSel();
-      } else if (mod && (e.key === 'c' || e.key === 'C') && st.sel.length) {
-        var text = window.getSelection ? String(window.getSelection()) : '';
-        if (!text) { e.preventDefault(); this.copySel(); }
-      } else if (mod && (e.key === 'v' || e.key === 'V') && st.clip) {
-        e.preventDefault();
-        if (this.hoverCell) this.pasteAt(this.hoverCell.exp, this.hoverCell.date);
-        else this.showToast('Point at a day in the grid, then press ' + MOD + 'V.');
+      } else if (mod && isKey('C') && st.sel.length && !this.textSelected()) {
+        e.preventDefault(); this.keyAt = Date.now(); this.copySel(true);
+      } else if (mod && isKey('V') && st.clip) {
+        e.preventDefault(); this.keyAt = Date.now(); this.pasteHere();
       }
+    }
+    textSelected() { return !!(window.getSelection && String(window.getSelection())); }
+    // Backups for when the shortcut reaches the page only as a copy/paste event (Edit menu, some browsers).
+    onCopyEvent(e) {
+      var t = e.target;
+      if (Date.now() - (this.keyAt || 0) < 400 || !this.state.sel.length || this.textSelected()) return;
+      if (t && t.closest && t.closest('input, textarea, select')) return;
+      var text = this.copySel(false);
+      if (e.clipboardData && text) { e.clipboardData.setData('text/plain', text); e.preventDefault(); }
+    }
+    onPasteEvent(e) {
+      var t = e.target;
+      if (Date.now() - (this.keyAt || 0) < 400 || !this.state.clip) return;
+      if (t && t.closest && t.closest('input, textarea, select')) return;
+      e.preventDefault(); this.pasteHere();
+    }
+    pasteHere() {
+      if (this.hoverCell) this.pasteAt(this.hoverCell.exp, this.hoverCell.date);
+      else this.showToast('Point at a day in the grid, then press ' + MOD + 'V.');
     }
     clonePlans(src, delta, exp) {
       var self = this;
@@ -410,13 +576,17 @@
       made.forEach(function (p) { self.writePlan(p, null); });
       return made;
     }
-    copySel() {
+    // Copies the selected steps for pasting here, and (when writeSystem) puts their text on the system clipboard.
+    copySel(writeSystem) {
       var set = {};
       this.state.sel.forEach(function (id) { set[id] = 1; });
       var clip = this.state.data.plans.filter(function (p) { return set[p.id]; });
-      if (!clip.length) return;
+      if (!clip.length) return '';
+      var text = clip.map(function (p) { return p.text; }).join('\n');
+      if (writeSystem) copyText(text);
       this.setState({ clip: clip });
       this.showToast('Copied ' + clip.length + (clip.length === 1 ? ' step' : ' steps') + '. Point at a day and press ' + MOD + 'V, or click Paste on it.');
+      return text;
     }
     // Pastes the copied steps so the earliest lands on `date`. Steps copied from one experiment go into
     // the target row; steps from several experiments stay in their own rows.
@@ -435,34 +605,65 @@
     startAdd(exp, d) {
       var mine = this.state.data.plans.filter(function (p) { return p.exp === exp; });
       var last = mine[mine.length - 1];
-      this.setState({ adding: { exp: exp, date: d }, draft: '', draftCat: last ? last.cat : 'none', sel: [] });
+      this.setState({ adding: { exp: exp, date: d }, draft: '', draftCat: last ? last.cat : 'none', draftRepeat: defaultRepeat(d), sel: [] });
+    }
+    // Writes repeats of `p` on each date in `dates`, linked to p's series (created if p has none).
+    addRepeats(p, dates) {
+      var self = this;
+      if (!dates.length) return [];
+      var series = p.series || newId('s');
+      if (!p.series) this.writePlan(Object.assign({}, p, { series: series }), p);
+      var made = dates.map(function (d) { return { id: newId('p'), exp: p.exp, date: d, text: p.text, cat: p.cat, done: false, series: series }; });
+      made.forEach(function (x) { self.writePlan(x, null); });
+      return made;
     }
     commitAdd() {
-      var st = this.state, t = (st.draft || '').trim();
+      var self = this, st = this.state, t = (st.draft || '').trim();
       if (!st.adding || !t) { this.setState({ adding: null }); return; }
-      this.writePlan({ id: newId('p'), exp: st.adding.exp, date: st.adding.date, text: t, cat: st.draftCat, done: false }, null);
+      var p = { id: newId('p'), exp: st.adding.exp, date: st.adding.date, text: t, cat: st.draftCat, done: false };
+      this.writePlan(p, null);
+      var made = this.addRepeats(p, repeatDates(p.date, st.draftRepeat));
       this.setState({ adding: null, draft: '' });
+      if (made.length) {
+        var all = made.concat(p);
+        this.showToast('Added ' + all.length + ' steps through ' + U.shortDate(made[made.length - 1].date), function () { all.forEach(function (x) { self.removePlan(x); }); });
+      }
+    }
+    // Later steps in the same repeat series as p.
+    laterRepeats(p) {
+      if (!p.series) return [];
+      return this.state.data.plans.filter(function (x) { return x.series === p.series && x.id !== p.id && x.date > p.date; });
     }
     startEdit(p) { this.editingRef = p.id; this.editDraft = null; this.setState({ editing: p.id, sel: [], drag: null }); }
-    commitEdit(p, value, cat) {
+    // d: { text, cat, repeat, later } from the step editor
+    commitEdit(p, d) {
+      var self = this;
       if (this.editingRef !== p.id) return;
       this.editingRef = null; this.editDraft = null;
-      var t = (value || '').trim() || p.text;
-      cat = cat || p.cat;
-      if (t !== p.text || cat !== p.cat) this.writePlan(Object.assign({}, p, { text: t, cat: cat }), p);
+      var t = (d.text || '').trim() || p.text, cat = d.cat || p.cat;
+      var next = Object.assign({}, p, { text: t, cat: cat });
+      if (t !== p.text || cat !== p.cat) this.writePlan(next, p);
+      if (d.later && (t !== p.text || cat !== p.cat)) {
+        this.laterRepeats(p).forEach(function (x) { self.writePlan(Object.assign({}, x, { text: t, cat: cat }), x); });
+      }
+      var made = this.addRepeats(next, repeatDates(p.date, d.repeat));
       this.setState({ editing: null });
+      if (made.length) {
+        this.showToast('Added ' + made.length + (made.length === 1 ? ' repeat' : ' repeats') + ' through ' + U.shortDate(made[made.length - 1].date), function () { made.forEach(function (x) { self.removePlan(x); }); });
+      }
     }
     saveEditDraft() {
       var id = this.state.editing, d = this.editDraft;
       var p = this.state.data.plans.find(function (x) { return x.id === id; });
-      if (p && d) this.commitEdit(p, d.text, d.cat); else this.cancelEdit();
+      if (p && d) this.commitEdit(p, d); else this.cancelEdit();
     }
     cancelEdit() { this.editingRef = null; this.editDraft = null; this.setState({ editing: null }); }
-    deleteStep(p) {
+    deleteStep(p, withLater) {
       var self = this;
+      var gone = [p].concat(withLater ? this.laterRepeats(p) : []);
       this.cancelEdit();
-      this.removePlan(p);
-      this.showToast('Deleted 1 step', function () { self.writePlan(p, null); });
+      gone.forEach(function (x) { self.removePlan(x); });
+      this.showToast('Deleted ' + gone.length + (gone.length === 1 ? ' step' : ' steps'), function () { gone.forEach(function (x) { self.writePlan(x, null); }); });
     }
 
     // ---------- experiments & categories ----------
@@ -556,9 +757,9 @@
     openExport() {
       var st = this.state;
       if (st.exportMode) { this.setState({ exportMode: false }); return; }
-      var ds = [];
+      var ds = [], from = U.mondayOf(st.viewStart);
       for (var i = 0; i < N_DAYS; i++) {
-        var d = U.shiftIso(st.start, i);
+        var d = U.shiftIso(from, i);
         if (d <= st.today && st.data.plans.some(function (p) { return p.date === d; })) ds.push(d);
       }
       this.setState({ exportMode: true, exportDays: ds, sel: [], adding: null, colorFor: null });
@@ -582,11 +783,15 @@
       var self = this, s = this.state, data = s.data, today = s.today;
       var cats = data.cats, exps = data.exps, plans = data.plans, notes = data.notes;
       var w = this.widths();
-      var gridCols = w.name + 'px repeat(' + N_DAYS + ', ' + w.day + 'px)';
+      var gridCols = w.name + 'px repeat(' + s.rangeDays + ', ' + w.day + 'px)';
       var rowStyle = { gridTemplateColumns: gridCols };
 
       var dates = [];
-      for (var i = 0; i < N_DAYS; i++) dates.push(U.shiftIso(s.start, i));
+      for (var i = 0; i < s.rangeDays; i++) dates.push(U.shiftIso(s.rangeStart, i));
+      // the 14 days offered in the export panel: two weeks from the Monday of the first day in view
+      var exportFrom = U.mondayOf(s.viewStart), exportDates = [];
+      for (var xi = 0; xi < N_DAYS; xi++) exportDates.push(U.shiftIso(exportFrom, xi));
+      var bandLabel = { position: 'sticky', left: w.name + 10, display: 'inline-flex', gap: 6, alignItems: 'center', whiteSpace: 'nowrap' };
 
       var allCats = cats.concat(NO_CAT);
       var catMap = U.categoryMap(allCats);
@@ -619,11 +824,11 @@
       var planItem = function (p) {
         if (s.editing === p.id) {
           return h(StepEditor, {
-            key: p.id, plan: p, options: catOptions,
+            key: p.id, plan: p, options: catOptions, later: self.laterRepeats(p).length,
             onDraft: function (d) { self.editDraft = d; },
-            onSave: function (text, cat) { self.commitEdit(p, text, cat); },
+            onSave: function (d) { self.commitEdit(p, d); },
             onCancel: function () { self.cancelEdit(); },
-            onDelete: function () { self.deleteStep(p); }
+            onDelete: function (withLater) { self.deleteStep(p, withLater); }
           });
         }
         return h(RM.PlanItem, {
@@ -644,6 +849,7 @@
             onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); self.commitAdd(); } else if (e.key === 'Escape') self.setState({ adding: null }); }
           }),
           h('select', { value: s.draftCat, 'aria-label': 'Category', onChange: function (e) { self.setState({ draftCat: e.target.value }); } }, catOptions),
+          h(RepeatFields, { start: s.adding.date, value: s.draftRepeat, onChange: function (v) { self.setState({ draftRepeat: v }); } }),
           h('div', { className: 'rm-addform-actions' },
             h('button', { type: 'button', onClick: function () { self.setState({ adding: null }); } }, 'Cancel'),
             h('button', { type: 'button', className: 'is-go', onClick: function () { self.commitAdd(); } }, 'Add')));
@@ -772,10 +978,10 @@
       var header = [
         h('div', { key: 'm', className: 'rm-row', style: rowStyle },
           h('div', { className: 'rm-band is-blank' }),
-          months.map(function (m) { return h('div', { key: m.label, className: 'rm-band', style: { gridColumn: 'span ' + m.span } }, m.label); })),
+          months.map(function (m) { return h('div', { key: m.label, className: 'rm-band', style: { gridColumn: 'span ' + m.span } }, h('span', { style: bandLabel }, m.label)); })),
         h('div', { key: 'w', className: 'rm-row', style: rowStyle },
           h('div', { className: 'rm-band is-week is-blank' }),
-          weeks.map(function (wk) { return h('div', { key: wk.label + wk.startD, className: 'rm-band is-week', style: { gridColumn: 'span ' + wk.span } }, h('span', { className: 'rm-tag' }, wk.label), h('span', null, wk.range)); })),
+          weeks.map(function (wk) { return h('div', { key: wk.label + wk.startD, className: 'rm-band is-week', style: { gridColumn: 'span ' + wk.span } }, h('span', { style: bandLabel }, h('span', { className: 'rm-tag' }, wk.label), h('span', null, wk.range))); })),
         h('div', { key: 'd', className: 'rm-row', style: rowStyle },
           h('div', { className: 'rm-namehead' }, 'Experiments',
             h(RM.ResizeHandle, {
@@ -810,13 +1016,13 @@
         }).replace(/ _\(No category\)_$/gm, '').replace(/ \(No category\)$/gm, '');
         var monday = U.mondayOf(today);
         panel = h(RM.NotebookExport, {
-          days: dates.map(function (d) { return { date: d, selected: s.exportDays.indexOf(d) >= 0, hasContent: !!(byDate[d] && byDate[d].length) || !!(notes[d] || '').trim() }; }),
+          days: exportDates.map(function (d) { return { date: d, selected: s.exportDays.indexOf(d) >= 0, hasContent: !!(byDate[d] && byDate[d].length) || !!(notes[d] || '').trim() }; }),
           onToggleDay: function (d) { self.toggleExportDay(d); },
           presets: [
             { label: 'Today', onClick: function () { self.setState({ exportDays: [today] }); } },
             { label: 'This week', onClick: function () { self.setExportRange(monday, U.shiftIso(monday, 6)); } },
             { label: 'Last 7 days', onClick: function () { self.setExportRange(U.shiftIso(today, -6), today); } },
-            { label: 'All 14', onClick: function () { self.setState({ exportDays: dates.slice() }); } },
+            { label: 'All 14', onClick: function () { self.setState({ exportDays: exportDates.slice() }); } },
             { label: 'Clear', onClick: function () { self.setState({ exportDays: [] }); } }
           ],
           group: xp.group, onGroupChange: function (g) { self.setExportPref('group', g); },
@@ -829,8 +1035,7 @@
           onClose: function () { self.setState({ exportMode: false }); }
         });
       } else {
-        var sum = U.buildDailySummary({ date: s.focus, plans: plans, exps: exps, cats: allCats, notes: notes });
-        sum.text = sum.text.replace(/ \(··\)$/gm, '');
+        var sum = dailyByCategory(s.focus, byDate[s.focus] || [], exps, allCats, catMap, notes);
         var fd = U.fromIso(s.focus);
         panel = h(RM.DailyNote, {
           dateLabel: DOW[fd.getDay()] + ', ' + MON[fd.getMonth()] + ' ' + fd.getDate(),
@@ -852,7 +1057,7 @@
         });
       }
 
-      var a0 = U.fromIso(dates[0]), a1 = U.fromIso(dates[dates.length - 1]);
+      var a0 = U.fromIso(s.viewStart), a1 = U.fromIso(s.viewEnd);
       var nActive = active.filter(function (e) { return !e.desk; }).length;
       var td = U.fromIso(today);
       var density = data.prefs.density === undefined && !data.prefs.dayWidth ? 'comfortable' : data.prefs.density;
@@ -877,14 +1082,15 @@
               h(RM.Button, { variant: 'inverse', onClick: function () { self.deleteSel(); } }, 'Delete'),
               h(RM.Button, { variant: 'inverse', iconOnly: true, icon: 'x', 'aria-label': 'Clear selection', onClick: function () { self.setState({ sel: [] }); } }))
             : h('div', { className: 'rm-hint' },
-              h('span', null, h('b', null, 'Drag'), ' a plan to move it, ', h('b', null, 'Alt-drag'), ' to copy'),
+              h('span', null, h('b', null, 'Drag'), ' a plan to move it'),
+              h('span', null, h('b', null, MOD + 'C ' + MOD + 'V'), ' to copy'),
               h('span', null, h('b', null, 'Shift-click'), ' to select several'),
               h('span', null, h('b', null, 'Double-click'), ' to edit or delete')),
           h('div', { className: 'rm-nav' },
             h(RM.Button, { icon: 'notebook', 'aria-pressed': s.exportMode ? 'true' : 'false', onClick: function () { self.openExport(); } }, 'Export notebook'),
-            h(RM.Button, { iconOnly: true, icon: 'chevron-left', 'aria-label': 'Previous week', onClick: function () { self.setState({ start: U.shiftIso(s.start, -7) }); } }),
-            h(RM.Button, { onClick: function () { self.setState({ start: U.mondayOf(today), focus: today }); } }, 'Today'),
-            h(RM.Button, { iconOnly: true, icon: 'chevron-right', 'aria-label': 'Next week', onClick: function () { self.setState({ start: U.shiftIso(s.start, 7) }); } }),
+            h(RM.Button, { iconOnly: true, icon: 'chevron-left', 'aria-label': 'Previous week', onClick: function () { self.scrollToDate(U.mondayOf(U.shiftIso(s.viewStart, -1)), true); } }),
+            h(RM.Button, { onClick: function () { self.setState({ focus: today }); self.scrollToDate(U.mondayOf(today), true); } }, 'Today'),
+            h(RM.Button, { iconOnly: true, icon: 'chevron-right', 'aria-label': 'Next week', onClick: function () { self.scrollToDate(U.shiftIso(U.mondayOf(s.viewStart), 7), true); } }),
             h('span', { className: 'rm-range' }, MON[a0.getMonth()] + ' ' + a0.getDate() + ' – ' + MON[a1.getMonth()] + ' ' + a1.getDate() + ', ' + a1.getFullYear()))),
 
         h('div', { className: 'rm-legend' },
@@ -910,7 +1116,7 @@
 
         h('div', { className: 'rm-main' },
           h('section', { className: 'rm-board', 'aria-label': 'Roadmap grid', onPointerLeave: function () { self.hoverCell = null; } },
-            h('div', { className: 'rm-scroll' }, h('div', { className: 'rm-grid' }, header, rows))),
+            h('div', { className: 'rm-scroll', ref: function (el) { self.scrollEl = el; }, onScroll: function () { self.onScroll(); } }, h('div', { className: 'rm-grid' }, header, rows))),
           panel),
 
         s.toast ? h('div', { className: 'rm-toast', role: 'status' },

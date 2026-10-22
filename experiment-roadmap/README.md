@@ -37,3 +37,7 @@ Deleting steps shows an **Undo** toast for 8 seconds.
 - Delete selected steps with the Delete key or **Delete** in the selection bar. Delete an experiment with the × that appears when you hover over its name; it asks to confirm first.
 - Every delete can be undone from the toast.
 - Clicking empty space, or pressing Esc, clears picked days in the New experiment row and the step selection.
+- **Endless timeline.** The grid scrolls sideways without end: weeks are added as you near either edge, and days far off the other side are dropped so the page stays fast. ◀ / ▶ jump a week, **Today** returns to this week, and the date range in the header shows what is on screen. The export panel offers the two weeks starting at the first Monday in view.
+- **Repeating steps.** When adding or editing a step, choose how often it repeats (every day, every weekday, every 2 or 3 days, weekly, every 2 or 4 weeks, or every N days) and an end date. Each repeat is an ordinary step you tick off on its own; repeats share a series id, so the step editor can also change or delete all later repeats.
+- **Daily note grouped by category.** Steps are listed under their category (TC, Cloning, …) in legend order, with steps of the same experiment together; the copyable summary uses the same grouping.
+- Keyboard copy and paste match the physical C and V keys, so they also work with non-Latin keyboard layouts and input methods. Copied steps are also placed on the system clipboard as text.
