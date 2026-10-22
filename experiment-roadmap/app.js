@@ -11,6 +11,11 @@
   var MONL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   var DENSITY = { compact: 168, comfortable: 200, roomy: 240 };
   var EXPORT_DEFAULTS = { group: 'day', format: 'md', includeOpen: false, includeNotes: true, includeDesk: true };
+  // Steps start without a category (an experiment spans many kinds of work); set one per step later.
+  var NO_CAT = { id: 'none', name: 'No category', tag: '··', color: 'var(--ink-2)', group: 'bench' };
+  var MOD = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl+';
+  // Pointer-downs on these keep the current selection; anywhere else counts as a click on empty space.
+  var KEEP_SELECTION = '.rm-plan, .rm-ghost, .rm-gname, .rm-selbar, .rm-toast, .rm-addform, .rm-cell-tool, .rm-resize, .rm-note, .rm-palette, button, input, select, textarea, label';
 
   // ---------- helpers ----------
   function todayIso() { return U.iso(new Date()); }
@@ -205,6 +210,23 @@
   })();
 
   // ---------- small pieces ----------
+  // Inline editor for one step: text, category, delete. Replaces the step row while open.
+  function StepEditor(props) {
+    var t = R.useState(props.plan.text), c = R.useState(props.plan.cat || 'none');
+    var report = function (text, cat) { props.onDraft({ text: text, cat: cat }); };
+    return h('div', { className: 'rm-addform rm-editform', onPointerDown: stop, onDoubleClick: stop },
+      h('input', {
+        autoFocus: true, value: t[0], 'aria-label': 'Step text',
+        onChange: function (e) { t[1](e.target.value); report(e.target.value, c[0]); },
+        onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); props.onSave(t[0], c[0]); } else if (e.key === 'Escape') props.onCancel(); }
+      }),
+      h('select', { value: c[0], 'aria-label': 'Category', onChange: function (e) { c[1](e.target.value); report(t[0], e.target.value); } }, props.options),
+      h('div', { className: 'rm-addform-actions' },
+        h('button', { type: 'button', onClick: props.onDelete }, 'Delete'),
+        h('button', { type: 'button', onClick: props.onCancel }, 'Cancel'),
+        h('button', { type: 'button', className: 'is-go', onClick: function () { props.onSave(t[0], c[0]); } }, 'Save')));
+  }
+
   function Seg(props) {
     return h('div', { className: 'rm-seg', role: 'radiogroup', 'aria-label': props.label },
       props.options.map(function (o) {
@@ -221,8 +243,8 @@
       this.state = {
         data: derive(store.docs()), sync: store.info(), today: t, start: U.mondayOf(t), focus: t,
         sel: [], drag: null, adding: null, draft: '', draftCat: 'tc',
-        editing: null, colorFor: null, catFilter: null, newCat: '', renaming: null,
-        ghost: [], ghostName: '', ghostCat: 'tc', copied: false, xcopied: false,
+        editing: null, colorFor: null, catFilter: null, newCat: '', renaming: null, confirmDel: null, clip: null,
+        ghost: [], ghostName: '', copied: false, xcopied: false,
         exportMode: false, exportDays: [], liveW: null, toast: null, canDownload: !window.claude
       };
       this.localW = U.loadColumnWidths();
@@ -231,10 +253,14 @@
     componentDidMount() {
       var self = this;
       store.subscribe(function () { self.setState({ data: derive(store.docs()), sync: store.info() }); });
-      this._up = function () { self.up(); };
+      this._up = function (e) { self.up(e); };
       this._cancel = function () { if (self.state.drag) self.setState({ drag: null }); };
+      this._down = function (e) { self.blankDown(e); };
+      this._key = function (e) { self.onKey(e); };
       window.addEventListener('pointerup', this._up);
       window.addEventListener('pointercancel', this._cancel);
+      window.addEventListener('pointerdown', this._down, true);
+      window.addEventListener('keydown', this._key);
       this._tick = setInterval(function () {
         var t = todayIso();
         if (t !== self.state.today) self.setState(function (st) { return { today: t, focus: st.focus === st.today ? t : st.focus }; });
@@ -247,6 +273,8 @@
     componentWillUnmount() {
       window.removeEventListener('pointerup', this._up);
       window.removeEventListener('pointercancel', this._cancel);
+      window.removeEventListener('pointerdown', this._down, true);
+      window.removeEventListener('keydown', this._key);
       clearInterval(this._tick); clearTimeout(this._ct); clearTimeout(this._xt); clearTimeout(this._tt);
     }
 
@@ -294,13 +322,20 @@
       var dr = this.state.drag;
       if (dr && dr.over !== d) this.setState({ drag: Object.assign({}, dr, { over: d }) });
     }
-    up() {
+    up(e) {
       var st = this.state, dr = st.drag;
       if (!dr) return;
       if (dr.kind === 'move') {
         var delta = U.dayDiff(dr.from, dr.over);
         this.setState({ drag: null });
-        if (delta !== 0) this.shiftSel(delta);
+        if (delta === 0) return;
+        if (e && e.altKey) {
+          // Alt/Option-drag copies instead of moving
+          var set = {};
+          st.sel.forEach(function (id) { set[id] = 1; });
+          var made = this.clonePlans(st.data.plans.filter(function (p) { return set[p.id]; }), delta, null);
+          this.setState({ sel: made.map(function (p) { return p.id; }) });
+        } else this.shiftSel(delta);
         return;
       }
       if (dr.kind === 'ghost') {
@@ -338,10 +373,69 @@
         });
       }
     }
+    // A pointer-down on empty space clears picked days, selected steps and open pickers,
+    // and saves a step that is being edited.
+    blankDown(e) {
+      var st = this.state, t = e.target;
+      var inside = function (sel) { return !!(t && t.closest && t.closest(sel)); };
+      if (st.editing && !inside('.rm-editform')) this.saveEditDraft();
+      if (inside(KEEP_SELECTION)) return;
+      var next = {};
+      if (st.sel.length) next.sel = [];
+      if (st.ghost.length) next.ghost = [];
+      if (st.colorFor) next.colorFor = null;
+      if (st.confirmDel) next.confirmDel = null;
+      if (Object.keys(next).length) this.setState(next);
+    }
+    onKey(e) {
+      var t = e.target, st = this.state;
+      if (t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
+      var mod = e.metaKey || e.ctrlKey;
+      if (e.key === 'Escape') {
+        this.setState({ sel: [], ghost: [], colorFor: null, confirmDel: null, adding: null });
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && st.sel.length) {
+        e.preventDefault(); this.deleteSel();
+      } else if (mod && (e.key === 'c' || e.key === 'C') && st.sel.length) {
+        var text = window.getSelection ? String(window.getSelection()) : '';
+        if (!text) { e.preventDefault(); this.copySel(); }
+      } else if (mod && (e.key === 'v' || e.key === 'V') && st.clip) {
+        e.preventDefault();
+        if (this.hoverCell) this.pasteAt(this.hoverCell.exp, this.hoverCell.date);
+        else this.showToast('Point at a day in the grid, then press ' + MOD + 'V.');
+      }
+    }
+    clonePlans(src, delta, exp) {
+      var self = this;
+      var made = src.map(function (p) { return { id: newId('p'), exp: exp || p.exp, date: U.shiftIso(p.date, delta), text: p.text, cat: p.cat, done: false }; });
+      made.forEach(function (p) { self.writePlan(p, null); });
+      return made;
+    }
+    copySel() {
+      var set = {};
+      this.state.sel.forEach(function (id) { set[id] = 1; });
+      var clip = this.state.data.plans.filter(function (p) { return set[p.id]; });
+      if (!clip.length) return;
+      this.setState({ clip: clip });
+      this.showToast('Copied ' + clip.length + (clip.length === 1 ? ' step' : ' steps') + '. Point at a day and press ' + MOD + 'V, or click Paste on it.');
+    }
+    // Pastes the copied steps so the earliest lands on `date`. Steps copied from one experiment go into
+    // the target row; steps from several experiments stay in their own rows.
+    pasteAt(exp, date) {
+      var self = this, clip = this.state.clip;
+      if (!clip || !clip.length) return;
+      var base = clip.reduce(function (m, p) { return p.date < m ? p.date : m; }, clip[0].date);
+      var oneExp = clip.every(function (p) { return p.exp === clip[0].exp; });
+      var made = this.clonePlans(clip, U.dayDiff(base, date), oneExp ? exp : null);
+      this.setState({ sel: made.map(function (p) { return p.id; }) });
+      this.showToast('Pasted ' + made.length + (made.length === 1 ? ' step' : ' steps'), function () {
+        made.forEach(function (p) { self.removePlan(p); });
+        self.setState({ sel: [] });
+      });
+    }
     startAdd(exp, d) {
       var mine = this.state.data.plans.filter(function (p) { return p.exp === exp; });
       var last = mine[mine.length - 1];
-      this.setState({ adding: { exp: exp, date: d }, draft: '', draftCat: last ? last.cat : 'tc', sel: [] });
+      this.setState({ adding: { exp: exp, date: d }, draft: '', draftCat: last ? last.cat : 'none', sel: [] });
     }
     commitAdd() {
       var st = this.state, t = (st.draft || '').trim();
@@ -349,15 +443,27 @@
       this.writePlan({ id: newId('p'), exp: st.adding.exp, date: st.adding.date, text: t, cat: st.draftCat, done: false }, null);
       this.setState({ adding: null, draft: '' });
     }
-    startEdit(p) { this.editingRef = p.id; this.setState({ editing: p.id, sel: [], drag: null }); }
-    commitEdit(p, value) {
+    startEdit(p) { this.editingRef = p.id; this.editDraft = null; this.setState({ editing: p.id, sel: [], drag: null }); }
+    commitEdit(p, value, cat) {
       if (this.editingRef !== p.id) return;
-      this.editingRef = null;
-      var t = (value || '').trim();
-      if (t && t !== p.text) this.writePlan(Object.assign({}, p, { text: t }), p);
+      this.editingRef = null; this.editDraft = null;
+      var t = (value || '').trim() || p.text;
+      cat = cat || p.cat;
+      if (t !== p.text || cat !== p.cat) this.writePlan(Object.assign({}, p, { text: t, cat: cat }), p);
       this.setState({ editing: null });
     }
-    cancelEdit() { this.editingRef = null; this.setState({ editing: null }); }
+    saveEditDraft() {
+      var id = this.state.editing, d = this.editDraft;
+      var p = this.state.data.plans.find(function (x) { return x.id === id; });
+      if (p && d) this.commitEdit(p, d.text, d.cat); else this.cancelEdit();
+    }
+    cancelEdit() { this.editingRef = null; this.editDraft = null; this.setState({ editing: null }); }
+    deleteStep(p) {
+      var self = this;
+      this.cancelEdit();
+      this.removePlan(p);
+      this.showToast('Deleted 1 step', function () { self.writePlan(p, null); });
+    }
 
     // ---------- experiments & categories ----------
     setColor(id, hex) { this.patchMeta('exps', id, { color: hex }); this.setState({ colorFor: null }); }
@@ -374,8 +480,20 @@
       var id = newId('x');
       var order = exps.reduce(function (m, e) { return Math.max(m, e.order || 0); }, 0) + 1;
       this.patchMeta('exps', id, { id: id, name: (st.ghostName || '').trim() || 'New experiment', color: U.nextExperimentColor(exps), order: order });
-      st.ghost.forEach(function (d) { self.writePlan({ id: newId('p'), exp: id, date: d, text: 'Plan step', cat: st.ghostCat, done: false }, null); });
+      st.ghost.forEach(function (d) { self.writePlan({ id: newId('p'), exp: id, date: d, text: 'Plan step', cat: 'none', done: false }, null); });
       this.setState({ ghost: [], ghostName: '' });
+    }
+    deleteExp(e) {
+      var self = this;
+      var exp = Object.assign({}, e);
+      var gone = this.state.data.plans.filter(function (p) { return p.exp === e.id; });
+      gone.forEach(function (p) { self.removePlan(p); });
+      this.patchMeta('exps', e.id, null);
+      this.setState({ confirmDel: null, colorFor: null, sel: [] });
+      this.showToast('Deleted ' + e.name, function () {
+        self.patchMeta('exps', exp.id, exp);
+        gone.forEach(function (p) { self.writePlan(p, null); });
+      });
     }
     addCat() {
       var cats = this.state.data.cats, name = (this.state.newCat || '').trim();
@@ -470,7 +588,8 @@
       var dates = [];
       for (var i = 0; i < N_DAYS; i++) dates.push(U.shiftIso(s.start, i));
 
-      var catMap = U.categoryMap(cats);
+      var allCats = cats.concat(NO_CAT);
+      var catMap = U.categoryMap(allCats);
       var expMap = {};
       exps.forEach(function (e) { expMap[e.id] = e; });
       var byKey = {}, byDate = {}, byExp = {};
@@ -495,20 +614,27 @@
         var ga = dr.from < dr.over ? dr.from : dr.over, gb = dr.from < dr.over ? dr.over : dr.from;
         for (var gd = ga; gd <= gb; gd = U.shiftIso(gd, 1)) ghostSet[gd] = 1;
       }
-      var catOptions = cats.map(function (c) { return h('option', { key: c.id, value: c.id }, c.name); });
+      var catOptions = allCats.map(function (c) { return h('option', { key: c.id, value: c.id }, c.name); });
 
       var planItem = function (p) {
-        var c = catMap[p.cat] || { tag: '··', color: 'var(--muted)', name: 'Uncategorized' };
+        if (s.editing === p.id) {
+          return h(StepEditor, {
+            key: p.id, plan: p, options: catOptions,
+            onDraft: function (d) { self.editDraft = d; },
+            onSave: function (text, cat) { self.commitEdit(p, text, cat); },
+            onCancel: function () { self.cancelEdit(); },
+            onDelete: function () { self.deleteStep(p); }
+          });
+        }
         return h(RM.PlanItem, {
-          key: p.id, text: p.text, category: c, done: p.done, selected: !!selSet[p.id],
-          dimmed: !!s.catFilter && s.catFilter !== p.cat, editing: s.editing === p.id,
+          key: p.id, text: p.text, category: catMap[p.cat] || NO_CAT, done: p.done, selected: !!selSet[p.id],
+          dimmed: !!s.catFilter && s.catFilter !== p.cat,
           onToggle: function () { self.toggle(p.id); },
           onPointerDown: function (e) { self.chipDown(p, e); },
-          onDoubleClick: function () { self.startEdit(p); },
-          onRename: function (v) { self.commitEdit(p, v); },
-          onCancelRename: function () { self.cancelEdit(); }
+          onDoubleClick: function () { self.startEdit(p); }
         });
       };
+      var nClip = s.clip ? s.clip.length : 0;
 
       var addForm = function () {
         return h('div', { className: 'rm-addform', onPointerDown: stop },
@@ -535,10 +661,11 @@
             onBlur: function (ev) { self.commitRename(e, ev.currentTarget.value); }
           });
         }
+        var nSteps = (byExp[e.id] || []).length;
         return h('div', {
           className: 'rm-expwrap', title: e.desk ? undefined : 'Double-click the name to rename',
           onDoubleClick: e.desk ? undefined : function (ev) {
-            if (ev.target.closest && ev.target.closest('.rm-palette, .rm-swatch, input')) return;
+            if (ev.target.closest && ev.target.closest('.rm-palette, .rm-swatch, .rm-confirm, button, input')) return;
             self.renamingRef = e.id; self.setState({ renaming: e.id, colorFor: null });
           }
         }, h(RM.ExperimentLabel, {
@@ -546,7 +673,16 @@
           paletteOpen: s.colorFor === e.id,
           onColorClick: function () { self.setState({ colorFor: s.colorFor === e.id ? null : e.id }); },
           onColorChange: function (hex) { self.setColor(e.id, hex); }
-        }));
+        }),
+        e.desk || s.renaming === e.id ? null : h('button', {
+          type: 'button', className: 'rm-exp-del', title: 'Delete experiment', 'aria-label': 'Delete ' + e.name,
+          onClick: function () { self.setState({ confirmDel: e.id, colorFor: null }); }
+        }, h(RM.Icon, { name: 'x', size: 13 })),
+        s.confirmDel === e.id ? h('div', { className: 'rm-confirm', role: 'group', 'aria-label': 'Delete experiment' },
+          h('div', null, nSteps ? 'Delete this experiment and its ' + nSteps + (nSteps === 1 ? ' step?' : ' steps?') : 'Delete this experiment?'),
+          h('div', { className: 'rm-gname-acts' },
+            h(RM.Button, { size: 'sm', onClick: function () { self.setState({ confirmDel: null }); } }, 'Cancel'),
+            h(RM.Button, { size: 'sm', variant: 'primary', onClick: function () { self.deleteExp(e); } }, 'Delete'))) : null);
       };
 
       var mkRow = function (e, completed) {
@@ -561,13 +697,18 @@
             key: d, laneColor: completed || e.desk ? undefined : e.color, today: d === today, dayDone: dayDone(d),
             dropTarget: !!dropKeys[k], addLabel: 'Add a step to ' + e.name + ' on ' + U.shortDate(d),
             onAdd: adding ? undefined : function () { self.startAdd(e.id, d); },
-            onPointerEnter: function () { self.enter(d); }
+            onPointerEnter: function () { self.enter(d); self.hoverCell = { exp: e.id, date: d }; }
           },
             ps.length ? h(RM.PlanCard, {
               dayOffset: !e.desk && first ? U.dayDiff(first, d) : null,
               allDone: ps.every(function (p) { return p.done; })
             }, ps.map(planItem)) : null,
-            adding ? addForm() : null);
+            adding ? addForm() : null,
+            nClip && !adding ? h('button', {
+              type: 'button', className: 'rm-cell-tool rm-paste', onPointerDown: stop,
+              'aria-label': 'Paste ' + nClip + (nClip === 1 ? ' step' : ' steps') + ' on ' + U.shortDate(d),
+              onClick: function () { self.pasteAt(e.id, d); }
+            }, 'Paste') : null);
         });
         return h('div', { key: e.id, className: 'rm-row' + (completed ? ' is-completed' : ''), style: rowStyle }, nameCell(e, completed, meta), cells);
       };
@@ -587,7 +728,6 @@
                 onChange: function (e) { self.setState({ ghostName: e.target.value }); },
                 onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); self.createExp(); } }
               }),
-              h('select', { key: 'c', id: 'rm-ghostcat', className: 'rm-field', value: s.ghostCat, 'aria-label': 'Category for the new steps', onChange: function (e) { self.setState({ ghostCat: e.target.value }); } }, catOptions),
               h('div', { key: 'a', className: 'rm-gname-acts' },
                 h(RM.Button, { size: 'sm', onClick: function () { self.setState({ ghost: [] }); } }, 'Clear'),
                 h(RM.Button, { size: 'sm', variant: 'primary', onClick: function () { self.createExp(); } }, 'Create'))
@@ -665,9 +805,9 @@
       if (s.exportMode) {
         var xp = this.exportPrefs();
         var exportText = U.buildNotebook({
-          days: s.exportDays, plans: plans, exps: exps, cats: cats, notes: notes,
+          days: s.exportDays, plans: plans, exps: exps, cats: allCats, notes: notes,
           group: xp.group, format: xp.format, includeOpen: xp.includeOpen, includeNotes: xp.includeNotes, includeDesk: xp.includeDesk
-        });
+        }).replace(/ _\(No category\)_$/gm, '').replace(/ \(No category\)$/gm, '');
         var monday = U.mondayOf(today);
         panel = h(RM.NotebookExport, {
           days: dates.map(function (d) { return { date: d, selected: s.exportDays.indexOf(d) >= 0, hasContent: !!(byDate[d] && byDate[d].length) || !!(notes[d] || '').trim() }; }),
@@ -689,7 +829,8 @@
           onClose: function () { self.setState({ exportMode: false }); }
         });
       } else {
-        var sum = U.buildDailySummary({ date: s.focus, plans: plans, exps: exps, cats: cats, notes: notes });
+        var sum = U.buildDailySummary({ date: s.focus, plans: plans, exps: exps, cats: allCats, notes: notes });
+        sum.text = sum.text.replace(/ \(··\)$/gm, '');
         var fd = U.fromIso(s.focus);
         panel = h(RM.DailyNote, {
           dateLabel: DOW[fd.getDay()] + ', ' + MON[fd.getMonth()] + ' ' + fd.getDate(),
@@ -701,7 +842,7 @@
               })
             });
           }),
-          done: sum.done, total: sum.total, categories: cats,
+          done: sum.done, total: sum.total, categories: allCats,
           notes: notes[s.focus] || '', notesId: 'rm-daynote', summary: sum.text, copied: s.copied,
           onPrev: function () { self.setState({ focus: U.shiftIso(s.focus, -1) }); },
           onNext: function () { self.setState({ focus: U.shiftIso(s.focus, 1) }); },
@@ -726,16 +867,19 @@
                 h('span', null, nActive + ' running · ' + finished.length + ' completed · today is ' + DOW[td.getDay()] + ' ' + U.shortDate(today)),
                 h('span', { className: 'rm-sync is-' + s.sync.tone, role: 'status' }, h('i', { 'aria-hidden': 'true' }), s.sync.text)))),
           s.sel.length
-            ? h(RM.SelectionBar, {
-              count: s.sel.length,
-              onEarlier: function () { self.shiftSel(-1); }, onLater: function () { self.shiftSel(1); },
-              onDone: function () { self.doneSel(); }, onDelete: function () { self.deleteSel(); },
-              onClear: function () { self.setState({ sel: [] }); }
-            })
+            // SelectionBar from the design system, plus Copy
+            ? h('div', { className: 'rm-selbar', role: 'toolbar', 'aria-label': 'Selected plans' },
+              h('span', null, s.sel.length + (s.sel.length === 1 ? ' plan selected' : ' plans selected')),
+              h(RM.Button, { variant: 'inverse', icon: 'chevron-left', onClick: function () { self.shiftSel(-1); } }, '1 day earlier'),
+              h(RM.Button, { variant: 'inverse', onClick: function () { self.shiftSel(1); } }, '1 day later', h(RM.Icon, { name: 'chevron-right', size: 14 })),
+              h(RM.Button, { variant: 'inverse', icon: 'copy', onClick: function () { self.copySel(); } }, 'Copy'),
+              h(RM.Button, { variant: 'inverse', onClick: function () { self.doneSel(); } }, 'Mark done'),
+              h(RM.Button, { variant: 'inverse', onClick: function () { self.deleteSel(); } }, 'Delete'),
+              h(RM.Button, { variant: 'inverse', iconOnly: true, icon: 'x', 'aria-label': 'Clear selection', onClick: function () { self.setState({ sel: [] }); } }))
             : h('div', { className: 'rm-hint' },
-              h('span', null, h('b', null, 'Drag'), ' a plan to move it'),
+              h('span', null, h('b', null, 'Drag'), ' a plan to move it, ', h('b', null, 'Alt-drag'), ' to copy'),
               h('span', null, h('b', null, 'Shift-click'), ' to select several'),
-              h('span', null, h('b', null, 'Double-click'), ' to rename')),
+              h('span', null, h('b', null, 'Double-click'), ' to edit or delete')),
           h('div', { className: 'rm-nav' },
             h(RM.Button, { icon: 'notebook', 'aria-pressed': s.exportMode ? 'true' : 'false', onClick: function () { self.openExport(); } }, 'Export notebook'),
             h(RM.Button, { iconOnly: true, icon: 'chevron-left', 'aria-label': 'Previous week', onClick: function () { self.setState({ start: U.shiftIso(s.start, -7) }); } }),
@@ -765,7 +909,7 @@
             }))),
 
         h('div', { className: 'rm-main' },
-          h('section', { className: 'rm-board', 'aria-label': 'Roadmap grid' },
+          h('section', { className: 'rm-board', 'aria-label': 'Roadmap grid', onPointerLeave: function () { self.hoverCell = null; } },
             h('div', { className: 'rm-scroll' }, h('div', { className: 'rm-grid' }, header, rows))),
           panel),
 
