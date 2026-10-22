@@ -31,3 +31,9 @@ Deleting steps shows an **Undo** toast for 8 seconds.
 - **Download** in the notebook export.
 - **Day width** presets (Compact / Default / Roomy), which also give keyboard users a way to change column width.
 - Double-click an experiment's name to rename it.
+- New experiments don't ask for a category: their "Plan step" placeholders start with no category, and each step gets its own category when you edit it.
+- Double-click a step to edit its text and category, or delete it.
+- Copy steps to other days: select them and press Ctrl/⌘+C (or **Copy** in the selection bar), then point at a day and press Ctrl/⌘+V (or click **Paste** on that day). Steps copied from one experiment paste into the row you point at; the earliest lands on that day and the rest keep their spacing. Alt/Option-drag copies instead of moving.
+- Delete selected steps with the Delete key or **Delete** in the selection bar. Delete an experiment with the × that appears when you hover over its name; it asks to confirm first.
+- Every delete can be undone from the toast.
+- Clicking empty space, or pressing Esc, clears picked days in the New experiment row and the step selection.
