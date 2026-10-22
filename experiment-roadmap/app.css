@@ -256,3 +256,29 @@ body { margin: 0; }
 .rm-row.is-drop-before::after { top: -2px; }
 .rm-row.is-drop-after::after { bottom: -2px; }
 .rm-reordering, .rm-reordering * { cursor: grabbing !important; user-select: none !important; -webkit-user-select: none !important; }
+
+/* ---------- Contribution map (Year view), after GitHub ---------- */
+.rm-gh { --gh-cell: 13px; --gh-gap: 3px; margin: 0 16px 20px; padding: 14px 16px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 10px; }
+.rm-gh-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.rm-gh-head h3 { margin: 0; font-size: 14px; font-weight: 500; color: var(--ink-2); }
+.rm-gh-head h3 b { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rm-views-sm button { height: 26px; padding: 0 10px; font-size: 12px; }
+.rm-gh-scroll { overflow-x: auto; padding-bottom: 2px; }
+.rm-gh-board { display: grid; grid-template-columns: 30px auto; grid-template-rows: auto auto; column-gap: 6px; row-gap: 4px; width: max-content; }
+.rm-gh-months { grid-column: 2; display: grid; grid-template-columns: repeat(var(--gh-weeks), var(--gh-cell)); column-gap: var(--gh-gap); font-size: 10.5px; color: var(--muted); }
+.rm-gh-months span { white-space: nowrap; }
+.rm-gh-days { grid-column: 1; grid-row: 2; display: grid; grid-template-rows: repeat(7, var(--gh-cell)); row-gap: var(--gh-gap); font-size: 10px; color: var(--muted); line-height: var(--gh-cell); }
+.rm-gh-grid { grid-column: 2; grid-row: 2; display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, var(--gh-cell)); grid-auto-columns: var(--gh-cell); gap: var(--gh-gap); }
+.rm-gh-cell { width: var(--gh-cell); height: var(--gh-cell); padding: 0; border: 0; border-radius: 3px; background: var(--bg-hover); box-shadow: inset 0 0 0 1px rgba(127,127,127,0.12); cursor: pointer; display: inline-block; }
+.rm-gh-cell.is-out { background: transparent; box-shadow: none; cursor: default; }
+.rm-gh-cell:not(.is-out):not(.is-key):hover { box-shadow: 0 0 0 1.5px var(--ink-2); }
+.rm-gh-cell.is-focused { box-shadow: 0 0 0 1.5px var(--ink-2); }
+.rm-gh-cell.is-today { box-shadow: 0 0 0 2px var(--accent); }
+.rm-gh-cell.is-key { cursor: default; }
+.rm-gh-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; font-size: 11.5px; color: var(--muted); }
+.rm-gh-streaks { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.rm-gh-streaks b { color: var(--ink); font-weight: 600; }
+.rm-gh-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 4px; }
+.rm-gh-legend > span:not(.rm-gh-key) { margin: 0 2px; }
+.rm-gh-key { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; color: var(--ink-2); }
+.rm-gh-key i { width: 10px; height: 10px; border-radius: 3px; }

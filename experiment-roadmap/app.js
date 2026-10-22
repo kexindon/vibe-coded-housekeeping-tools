@@ -459,6 +459,113 @@
       rows);
   }
 
+  // GitHub-style contribution map: one square per day, weeks as columns, Monday to Sunday as rows.
+  var CONTRIB_MODES = [{ value: 'done', label: 'Completed' }, { value: 'planned', label: 'Planned' }, { value: 'exp', label: 'By experiment' }];
+  var CONTRIB_MIX = [0, 34, 56, 78, 100];      // % of the accent mixed into the surface, per level
+  var CONTRIB_EXP_MIX = [0, 45, 65, 82, 100]; // % of the experiment color, per level
+  var WEEKDAY_NAMES = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
+  function contribLevel(n) { return !n ? 0 : n === 1 ? 1 : n <= 3 ? 2 : n <= 5 ? 3 : 4; }
+  function renderContrib(self, c, y, inYear) {
+    var s = self.state, mode = s.contrib || s.data.prefs.contrib || 'done';
+    var y0 = y + '-01-01', y1 = y + '-12-31';
+    var planned = {}, done = {}, perExp = {};
+    inYear.forEach(function (p) {
+      planned[p.date] = (planned[p.date] || 0) + 1;
+      if (p.done) done[p.date] = (done[p.date] || 0) + 1;
+      var m = perExp[p.date] = perExp[p.date] || {};
+      m[p.exp] = (m[p.exp] || 0) + 1;
+    });
+    var value = function (d) { return (mode === 'done' ? done[d] : planned[d]) || 0; };
+    // The experiment that owns a day: most steps that day, bench experiments before the desk row.
+    var owner = function (d) {
+      var m = perExp[d];
+      if (!m) return null;
+      return Object.keys(m).sort(function (a, b) {
+        return ((c.expMap[a] && c.expMap[a].desk ? 1 : 0) - (c.expMap[b] && c.expMap[b].desk ? 1 : 0)) || (m[b] - m[a]) || ((c.expOrder[a] || 0) - (c.expOrder[b] || 0));
+      })[0];
+    };
+    var expList = function (d) {
+      var m = perExp[d] || {};
+      return Object.keys(m).map(function (id) { return ((c.expMap[id] || {}).name || 'Unknown') + ' (' + m[id] + ')'; }).join(', ');
+    };
+    // Streaks count consecutive days with at least one completed step.
+    var longest = 0, run = 0, totalDone = 0, byWeekday = [0, 0, 0, 0, 0, 0, 0];
+    for (var d = y0; d <= y1; d = U.shiftIso(d, 1)) {
+      if (done[d]) { run++; longest = Math.max(longest, run); totalDone += done[d]; byWeekday[U.fromIso(d).getDay()] += done[d]; } else run = 0;
+    }
+    var current = 0;
+    if (c.today >= y0) {
+      var cur = c.today > y1 ? y1 : c.today;
+      if (!done[cur]) cur = U.shiftIso(cur, -1); // like GitHub, today does not break a streak yet
+      while (cur >= y0 && done[cur]) { current++; cur = U.shiftIso(cur, -1); }
+    }
+    var topDay = byWeekday.indexOf(Math.max.apply(null, byWeekday));
+    var totalPlanned = inYear.length, labDays = Object.keys(planned).length;
+    var expsSeen = {};
+    inYear.forEach(function (p) { if (c.expMap[p.exp] && !c.expMap[p.exp].desk) expsSeen[p.exp] = 1; });
+    var nExps = Object.keys(expsSeen).length;
+    var start = U.mondayOf(y0), nWeeks = Math.ceil((U.dayDiff(start, y1) + 1) / 7);
+    var cells = [], months = [], lastM = -1, owners = {};
+    for (var w = 0; w < nWeeks; w++) {
+      var first = U.shiftIso(start, w * 7);
+      var mm = U.fromIso(first < y0 ? y0 : first).getMonth();
+      if (mm !== lastM) { months.push(h('span', { key: w, style: { gridColumn: (w + 1) + ' / span 4' } }, MON[mm])); lastM = mm; }
+      for (var r = 0; r < 7; r++) {
+        (function (d) {
+          if (d < y0 || d > y1) { cells.push(h('span', { key: d, className: 'rm-gh-cell is-out' })); return; }
+          var n = value(d), lv = contribLevel(n), bg, title;
+          if (mode === 'exp') {
+            var o = owner(d), ex = o && c.expMap[o];
+            if (o) owners[o] = (owners[o] || 0) + 1;
+            lv = contribLevel(planned[d] || 0);
+            bg = ex ? tint(ex.color, CONTRIB_EXP_MIX[lv]) : null;
+            title = planned[d] ? expList(d) + ' on ' + fullDate(d) : 'No steps on ' + fullDate(d);
+          } else {
+            bg = lv ? tint('var(--accent)', CONTRIB_MIX[lv]) : null;
+            title = mode === 'done'
+              ? (n ? plural(n, 'step') + ' completed' : 'No steps completed') + ' on ' + fullDate(d)
+              : (n ? plural(n, 'step') + ' planned (' + (done[d] || 0) + ' done)' : 'Nothing planned') + ' on ' + fullDate(d);
+            if (n) title += ' · ' + expList(d);
+          }
+          cells.push(h('button', {
+            key: d, type: 'button', className: 'rm-gh-cell' + (d === c.today ? ' is-today' : '') + (d === s.focus ? ' is-focused' : ''),
+            style: bg ? { background: bg } : undefined, title: title, 'aria-label': title,
+            onClick: function () { self.goMonth(d); }
+          }));
+        })(U.shiftIso(first, r));
+      }
+    }
+    var legend = mode === 'exp'
+      ? Object.keys(owners).sort(function (a, b) { return owners[b] - owners[a]; }).slice(0, 8).map(function (id) {
+        var ex = c.expMap[id] || { name: 'Unknown', color: 'var(--exp-desk)' };
+        return h('span', { key: id, className: 'rm-gh-key', title: plural(owners[id], 'day') }, h('i', { style: { background: ex.color } }), ex.name);
+      })
+      : [h('span', { key: 'l' }, 'Less')].concat(CONTRIB_MIX.map(function (pct, i) {
+        return h('i', { key: i, className: 'rm-gh-cell is-key', style: i ? { background: tint('var(--accent)', pct) } : undefined });
+      }), h('span', { key: 'm' }, 'More'));
+    var headline = mode === 'done' ? [h('b', { key: 'n' }, totalDone), ' ' + (totalDone === 1 ? 'step' : 'steps') + ' completed in ' + y]
+      : mode === 'planned' ? [h('b', { key: 'n' }, totalPlanned), ' ' + (totalPlanned === 1 ? 'step' : 'steps') + ' planned in ' + y]
+      : [h('b', { key: 'n' }, nExps), ' ' + (nExps === 1 ? 'experiment' : 'experiments') + ' across ', h('b', { key: 'd' }, labDays), ' lab days in ' + y];
+    return h('div', { className: 'rm-gh' },
+      h('div', { className: 'rm-gh-head' },
+        h('h3', null, headline),
+        h('div', { className: 'rm-views rm-views-sm', role: 'radiogroup', 'aria-label': 'Contribution map shows' }, CONTRIB_MODES.map(function (o) {
+          var on = o.value === mode;
+          return h('button', { key: o.value, type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false', className: on ? 'is-on' : '', onClick: function () { self.setState({ contrib: o.value }); self.savePrefs({ contrib: o.value }); } }, o.label);
+        }))),
+      h('div', { className: 'rm-gh-scroll' },
+        h('div', { className: 'rm-gh-board', style: { '--gh-weeks': nWeeks } },
+          h('div', { className: 'rm-gh-months' }, months),
+          h('div', { className: 'rm-gh-days' }, ['Mon', '', 'Wed', '', 'Fri', '', ''].map(function (t, i) { return h('span', { key: i }, t); })),
+          h('div', { className: 'rm-gh-grid' }, cells))),
+      h('div', { className: 'rm-gh-foot' },
+        h('div', { className: 'rm-gh-streaks' },
+          h('span', null, 'Longest streak ', h('b', null, plural(longest, 'day'))),
+          h('span', null, 'Current streak ', h('b', null, plural(current, 'day'))),
+          totalDone ? h('span', null, 'Most done on ', h('b', null, WEEKDAY_NAMES[topDay])) : null),
+        h('div', { className: 'rm-gh-legend' }, legend)));
+  }
+
   function renderYear(self, c) {
     var s = self.state, y = s.yearAnchor || U.fromIso(c.today).getFullYear();
     var y0 = y + '-01-01', y1 = y + '-12-31', diy = U.dayDiff(y0, (y + 1) + '-01-01');
@@ -552,6 +659,7 @@
         stat('Weekend bench days', Object.keys(benchWeekend).length, 'feeds, splits, harvests…'),
         stat('Busiest day', busiest ? U.shortDate(busiest) : '—', busiest ? plural(perDay[busiest], 'step') : null),
         stat('Longest run', longest ? (U.dayDiff(c.stats[longest.id].first, c.stats[longest.id].last) + 1) + ' days' : '—', longest ? longest.name : null)),
+      renderContrib(self, c, y, inYear),
       h('div', { className: 'rm-ygrid' }, minis),
       gantt);
   }
