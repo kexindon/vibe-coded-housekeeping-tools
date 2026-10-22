@@ -31,6 +31,7 @@ Deleting steps shows an **Undo** toast for 8 seconds.
 - **Download** in the notebook export.
 - **Day width** presets (Compact / Default / Roomy), which also give keyboard users a way to change column width.
 - Double-click an experiment's name to rename it.
+- **Create an experiment without planning days.** Type a name in the New experiment row and press Create (or Enter) to get an empty row ("No steps yet"), then add steps with + on any day. Picking days first still works and also adds a "Plan step" on each picked day.
 - New experiments don't ask for a category: their "Plan step" placeholders start with no category, and each step gets its own category when you edit it.
 - Double-click a step to edit its text and category, or delete it.
 - Copy steps to other days: select them and press Ctrl/⌘+C (or **Copy** in the selection bar), then point at a day and press Ctrl/⌘+V (or click **Paste** on that day). Steps copied from one experiment paste into the row you point at; the earliest lands on that day and the rest keep their spacing. Alt/Option-drag copies instead of moving.

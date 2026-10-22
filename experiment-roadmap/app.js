@@ -675,14 +675,21 @@
       if (t && t !== e.name) this.patchMeta('exps', e.id, { name: t });
       this.setState({ renaming: null });
     }
+    // Creates an experiment from the New experiment row. With no days picked it needs a name and makes an
+    // empty row (add steps later with + on any day); with picked days it also adds a "Plan step" on each.
     createExp() {
-      var self = this, st = this.state, exps = st.data.exps;
-      if (!st.ghost.length) return;
+      var self = this, st = this.state, exps = st.data.exps, name = (st.ghostName || '').trim();
+      if (!st.ghost.length && !name) {
+        var field = document.getElementById('rm-ghostname');
+        if (field) field.focus();
+        return;
+      }
       var id = newId('x');
       var order = exps.reduce(function (m, e) { return Math.max(m, e.order || 0); }, 0) + 1;
-      this.patchMeta('exps', id, { id: id, name: (st.ghostName || '').trim() || 'New experiment', color: U.nextExperimentColor(exps), order: order });
+      this.patchMeta('exps', id, { id: id, name: name || 'New experiment', color: U.nextExperimentColor(exps), order: order });
       st.ghost.forEach(function (d) { self.writePlan({ id: newId('p'), exp: id, date: d, text: 'Plan step', cat: 'none', done: false }, null); });
       this.setState({ ghost: [], ghostName: '' });
+      if (!st.ghost.length) this.showToast('Created ' + name + '. Point at a day in its row and click + to add a step.');
     }
     deleteExp(e) {
       var self = this;
@@ -895,7 +902,7 @@
         var all = byExp[e.id] || [];
         var nDone = all.filter(function (p) { return p.done; }).length;
         var first = firstDate(e.id);
-        var meta = e.desk ? 'Analysis · slides · meetings' : (completed ? 'All ' + all.length + ' steps done' : nDone + ' of ' + all.length + ' steps done');
+        var meta = e.desk ? 'Analysis · slides · meetings' : !all.length ? 'No steps yet' : (completed ? 'All ' + all.length + ' steps done' : nDone + ' of ' + all.length + ' steps done');
         var cells = dates.map(function (d) {
           var k = e.id + '|' + d, ps = byKey[k] || [];
           var adding = !!(s.adding && s.adding.exp === e.id && s.adding.date === d);
@@ -925,19 +932,17 @@
       var ghostRow = h('div', { key: 'ghost', className: 'rm-row', style: rowStyle },
         h('div', { className: 'rm-gname' },
           h('div', { className: 'rm-gname-t' }, h(RM.Icon, { name: 'plus', size: 14, strokeWidth: 2.2 }), 'New experiment'),
-          s.ghost.length === 0
-            ? h('div', { className: 'rm-gname-s' }, 'Drag across days for a continuous run, or click separate days.')
-            : [
-              h('div', { key: 's', className: 'rm-gname-s' }, s.ghost.length + (s.ghost.length === 1 ? ' day: ' : ' days: ') + s.ghost.map(U.shortDate).join(', ')),
-              h('input', {
-                key: 'n', id: 'rm-ghostname', className: 'rm-field', placeholder: 'Experiment name', value: s.ghostName, 'aria-label': 'Experiment name',
-                onChange: function (e) { self.setState({ ghostName: e.target.value }); },
-                onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); self.createExp(); } }
-              }),
-              h('div', { key: 'a', className: 'rm-gname-acts' },
-                h(RM.Button, { size: 'sm', onClick: function () { self.setState({ ghost: [] }); } }, 'Clear'),
-                h(RM.Button, { size: 'sm', variant: 'primary', onClick: function () { self.createExp(); } }, 'Create'))
-            ]),
+          h('input', {
+            id: 'rm-ghostname', className: 'rm-field', placeholder: 'Experiment name', value: s.ghostName, 'aria-label': 'Experiment name',
+            onChange: function (e) { self.setState({ ghostName: e.target.value }); },
+            onKeyDown: function (e) { if (e.key === 'Enter') { e.preventDefault(); self.createExp(); } }
+          }),
+          h('div', { className: 'rm-gname-s' }, s.ghost.length
+            ? 'Adds a step on ' + s.ghost.length + (s.ghost.length === 1 ? ' day: ' : ' days: ') + s.ghost.map(U.shortDate).join(', ')
+            : 'Create it empty, or first drag across days (or click separate days) to add steps too.'),
+          h('div', { className: 'rm-gname-acts' },
+            s.ghost.length ? h(RM.Button, { size: 'sm', onClick: function () { self.setState({ ghost: [] }); } }, 'Clear days') : null,
+            h(RM.Button, { size: 'sm', variant: 'primary', icon: 'plus', onClick: function () { self.createExp(); } }, 'Create'))),
         dates.map(function (d) {
           return h(RM.GhostCell, {
             key: d, selected: !!ghostSet[d], label: 'Select ' + U.shortDate(d) + ' for a new experiment',
