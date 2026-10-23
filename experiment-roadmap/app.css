@@ -57,7 +57,7 @@ body { margin: 0; }
 .rm-row.is-completed .rm-cell { background: var(--bg-completed-lane); }
 .rm-expwrap { display: flex; flex-direction: column; }
 .rm-expwrap > .rm-exp { flex: 1; }
-.rm-expwrap .rm-exp-row { padding-right: 22px; }
+.rm-expwrap .rm-exp-row { padding-right: 50px; }
 .rm-exp-del { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; opacity: 0; }
 .rm-expwrap:hover .rm-exp-del, .rm-exp-del:focus-visible { opacity: 1; }
 .rm-exp-del:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--ink); }
@@ -282,3 +282,9 @@ body { margin: 0; }
 .rm-gh-legend > span:not(.rm-gh-key) { margin: 0 2px; }
 .rm-gh-key { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; color: var(--ink-2); }
 .rm-gh-key i { width: 10px; height: 10px; border-radius: 3px; }
+
+/* Pin an experiment so it stays among the running ones when all its steps are done */
+.rm-exp-pin { position: absolute; top: 8px; right: 34px; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; opacity: 0; }
+.rm-expwrap:hover .rm-exp-pin, .rm-exp-pin:focus-visible, .rm-exp-pin.is-on { opacity: 1; }
+.rm-exp-pin:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--ink); }
+.rm-exp-pin.is-on { color: var(--accent); }

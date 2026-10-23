@@ -318,6 +318,25 @@
       }));
   }
 
+  // Running vs completed rows. Like Roadmap.utils.sortExperiments, except a pinned experiment
+  // stays with the running ones (in its saved order) even when all its steps are done.
+  function splitExperiments(exps, plans) {
+    var sorted = U.sortExperiments(exps, plans);
+    var pinnedDone = sorted.completed.filter(function (e) { return e.pinned; });
+    if (!pinnedDone.length) return sorted;
+    var keep = {};
+    sorted.active.concat(pinnedDone).forEach(function (e) { keep[e.id] = 1; });
+    return {
+      active: exps.filter(function (e) { return keep[e.id]; }),
+      completed: sorted.completed.filter(function (e) { return !e.pinned; })
+    };
+  }
+  // Pin glyph, drawn like Roadmap.Icon: 24px grid, 2px round stroke, currentColor.
+  function PinIcon(props) {
+    return h('svg', { className: 'rm-icon', width: props.size || 13, height: props.size || 13, viewBox: '0 0 24 24', fill: props.filled ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+      h('path', { d: 'M9 3h6l-1 6 4 4H6l4-4-1-6z' }), h('path', { d: 'M12 13v8', fill: 'none' }));
+  }
+
   // ---------- month & year views ----------
   // Calendar-style views of the same data, after Apple Calendar: a month grid with multi-day experiment bars
   // and step "events", a year of mini months as a workload heat map, and a click-for-details preview.
@@ -705,7 +724,7 @@
       es.plans.forEach(function (x) { cats[x.cat] = (cats[x.cat] || 0) + 1; });
       var dayN = es.first && c.today >= es.first && c.today <= es.last ? U.dayDiff(es.first, c.today) + 1 : null;
       body = [
-        h('div', { key: 'x', className: 'rm-pop-exp' }, h('i', { style: { background: e.color } }), es.complete ? 'Completed experiment' : 'Experiment'),
+        h('div', { key: 'x', className: 'rm-pop-exp' }, h('i', { style: { background: e.color } }), (es.complete ? 'Completed experiment' : 'Experiment') + (e.pinned ? ' · pinned' : '')),
         h('h3', { key: 't', className: 'rm-pop-title' }, e.name),
         es.first ? h('div', { key: 'd', className: 'rm-pop-row' }, spanLabel(es.first, es.last),
           h('span', { className: 'rm-pop-chip' }, plural(U.dayDiff(es.first, es.last) + 1, 'day'))) : null,
@@ -719,7 +738,8 @@
         })) : null,
         h('div', { key: 'a', className: 'rm-pop-actions' },
           es.first ? h(RM.Button, { size: 'sm', variant: 'primary', onClick: function () { self.showInTimeline(es.next ? es.next.date : es.first); } }, 'Show in timeline') : null,
-          es.first ? h(RM.Button, { size: 'sm', onClick: function () { self.goMonth(es.next ? es.next.date : es.first); } }, 'Open month') : null)
+          es.first ? h(RM.Button, { size: 'sm', onClick: function () { self.goMonth(es.next ? es.next.date : es.first); } }, 'Open month') : null,
+          e.desk ? null : h(RM.Button, { size: 'sm', 'aria-pressed': e.pinned ? 'true' : 'false', onClick: function () { self.togglePin(e); } }, h(PinIcon, { size: 13, filled: !!e.pinned }), e.pinned ? 'Unpin' : 'Pin'))
       ];
     }
     return h('div', {
@@ -993,10 +1013,15 @@
       window.addEventListener('pointerup', up);
       window.addEventListener('pointercancel', up);
     }
+    togglePin(e) {
+      var on = !e.pinned;
+      this.patchMeta('exps', e.id, { pinned: on });
+      this.showToast(on ? 'Pinned ' + e.name + '. It stays in place even when all its steps are done.' : 'Unpinned ' + e.name + '.');
+    }
     finishReorder(r) {
       var st = this.state;
       if (!r.over || r.over === r.id) return;
-      var running = U.sortExperiments(st.data.exps, st.data.plans).active.filter(function (e) { return !e.desk; });
+      var running = splitExperiments(st.data.exps, st.data.plans).active.filter(function (e) { return !e.desk; });
       var ids = running.map(function (e) { return e.id; }).filter(function (id) { return id !== r.id; });
       var at = ids.indexOf(r.over);
       if (at < 0) return;
@@ -1419,6 +1444,12 @@
         }),
         e.desk || completed ? null : h('span', { className: 'rm-exp-grip', 'aria-hidden': 'true' }),
         e.desk || s.renaming === e.id ? null : h('button', {
+          type: 'button', className: 'rm-exp-pin' + (e.pinned ? ' is-on' : ''), 'aria-pressed': e.pinned ? 'true' : 'false',
+          title: e.pinned ? 'Pinned: stays here when all steps are done. Click to unpin.' : 'Pin: keep this experiment in place when all its steps are done',
+          'aria-label': (e.pinned ? 'Unpin ' : 'Pin ') + e.name,
+          onClick: function () { self.togglePin(e); }
+        }, h(PinIcon, { size: 13, filled: !!e.pinned })),
+        e.desk || s.renaming === e.id ? null : h('button', {
           type: 'button', className: 'rm-exp-del', title: 'Delete experiment', 'aria-label': 'Delete ' + e.name,
           onClick: function () { self.setState({ confirmDel: e.id, colorFor: null }); }
         }, h(RM.Icon, { name: 'x', size: 13 })),
@@ -1433,7 +1464,7 @@
         var all = byExp[e.id] || [];
         var nDone = all.filter(function (p) { return p.done; }).length;
         var first = firstDate(e.id);
-        var meta = e.desk ? 'Analysis · slides · meetings' : !all.length ? 'No steps yet' : (completed ? 'All ' + all.length + ' steps done' : nDone + ' of ' + all.length + ' steps done');
+        var meta = e.desk ? 'Analysis · slides · meetings' : !all.length ? 'No steps yet' : (nDone === all.length ? 'All ' + all.length + ' steps done' : nDone + ' of ' + all.length + ' steps done');
         var cells = dates.map(function (d) {
           var k = e.id + '|' + d, ps = byKey[k] || [];
           var adding = !!(s.adding && s.adding.exp === e.id && s.adding.date === d);
@@ -1459,7 +1490,7 @@
         return h('div', { key: e.id, className: 'rm-row' + (completed ? ' is-completed' : '') + rcls, style: rowStyle, 'data-exp': e.desk || completed ? undefined : e.id }, nameCell(e, completed, meta), cells);
       };
 
-      var sorted = U.sortExperiments(exps, plans);
+      var sorted = splitExperiments(exps, plans);
       var active = sorted.active, finished = sorted.completed;
 
       var ghostRow = h('div', { key: 'ghost', className: 'rm-row', style: rowStyle },
