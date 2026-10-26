@@ -383,6 +383,14 @@
     return out;
   }
 
+  // Mouse hover opens a preview after a short pause; touch and pen keep click-to-open.
+  function hoverPreview(self, kind, id) {
+    return {
+      onPointerEnter: function (e) { if (e.pointerType === 'mouse') self.hoverPreview(kind, id, e.currentTarget); },
+      onPointerLeave: function (e) { if (e.pointerType === 'mouse') self.leavePreview(); }
+    };
+  }
+
   function renderMonth(self, c) {
     var s = self.state, anchor = s.monthAnchor || firstOfMonth(c.today), month = U.fromIso(anchor).getMonth();
     var gridStart = U.mondayOf(anchor), weeks = [];
@@ -403,8 +411,10 @@
         onClick: function (e) {
           e.stopPropagation();
           if (self.justDragged || e.shiftKey || e.metaKey || e.ctrlKey) return;
-          self.openPreview('step', p.id, e.currentTarget);
-        }
+          self.openPreview('step', p.id, e.currentTarget, true);
+        },
+        onPointerEnter: hoverPreview(self, 'step', p.id).onPointerEnter,
+        onPointerLeave: hoverPreview(self, 'step', p.id).onPointerLeave
       },
         h('i', { className: 'rm-mpill-dot', style: { background: ex.color } }),
         h('span', { className: 'rm-tag', style: { color: p.done ? 'var(--done-ink)' : cat.color } }, cat.tag),
@@ -464,7 +474,9 @@
             },
             title: e.name + ' · ' + spanLabel(st.first, st.last) + ' · ' + st.done + ' of ' + st.total + ' steps done',
             onPointerDown: stop,
-            onClick: function (ev) { ev.stopPropagation(); self.openPreview('exp', e.id, ev.currentTarget); }
+            onClick: function (ev) { ev.stopPropagation(); self.openPreview('exp', e.id, ev.currentTarget, true); },
+            onPointerEnter: hoverPreview(self, 'exp', e.id).onPointerEnter,
+            onPointerLeave: hoverPreview(self, 'exp', e.id).onPointerLeave
           },
             h('span', { className: 'rm-mspan-name' }, e.name),
             h('span', { className: 'rm-mspan-d' }, 'D' + U.dayDiff(st.first, segStart)));
@@ -652,14 +664,16 @@
           var a = st.first < y0 ? y0 : st.first, b = st.last > y1 ? y1 : st.last;
           var left = pct(a), width = Math.max(0.6, pct(U.shiftIso(b, 1)) - left);
           return h('div', { key: e.id, className: 'rm-gantt-row' + (st.complete ? ' is-complete' : '') },
-            h('button', { type: 'button', className: 'rm-gantt-name', onClick: function (ev) { self.openPreview('exp', e.id, ev.currentTarget); } },
+            h('button', Object.assign({ type: 'button', className: 'rm-gantt-name', onClick: function (ev) { self.openPreview('exp', e.id, ev.currentTarget, true); } }, hoverPreview(self, 'exp', e.id)),
               h('i', { style: { background: e.color } }), h('span', null, e.name)),
             h('div', { className: 'rm-gantt-track' },
               MONL.map(function (n, i) { return h('i', { key: n, className: 'rm-gantt-grid', style: { left: pct(U.iso(new Date(y, i, 1))) + '%' } }); }),
               h('button', {
                 type: 'button', className: 'rm-gantt-bar', title: e.name + ' · ' + spanLabel(st.first, st.last),
                 style: { left: left + '%', width: width + '%', background: tint(e.color, st.complete ? 18 : 38), borderColor: e.color },
-                onClick: function (ev) { self.openPreview('exp', e.id, ev.currentTarget); }
+                onClick: function (ev) { self.openPreview('exp', e.id, ev.currentTarget, true); },
+                onPointerEnter: hoverPreview(self, 'exp', e.id).onPointerEnter,
+                onPointerLeave: hoverPreview(self, 'exp', e.id).onPointerLeave
               }),
               st.plans.filter(function (p) { return p.date >= y0 && p.date <= y1; }).map(function (p) {
                 var lt = !p.done && p.date < c.today;
@@ -744,7 +758,11 @@
     }
     return h('div', {
       className: 'rm-pop is-' + pv.side, role: 'dialog', 'aria-label': pv.kind === 'step' ? 'Step details' : 'Experiment details',
-      style: { left: pv.left, top: pv.top }
+      style: { left: pv.left, top: pv.top },
+      onPointerEnter: function () { self.popHovered = true; clearTimeout(self._hideT); },
+      onPointerLeave: function (e) { self.popHovered = false; if (e.pointerType === 'mouse') self.leavePreview(); },
+      // Any click inside keeps it open after the pointer leaves
+      onPointerDown: function () { if (!pv.sticky) self.setState({ preview: Object.assign({}, pv, { sticky: true }) }); }
     },
       h('i', { className: 'rm-pop-arrow', style: pv.side === 'below' ? { left: pv.arrow } : { top: pv.arrow } }),
       h('button', { type: 'button', className: 'rm-pop-close', 'aria-label': 'Close', onClick: function () { self.setState({ preview: null }); } }, h(RM.Icon, { name: 'x', size: 13 })),
@@ -807,7 +825,7 @@
       document.removeEventListener('copy', this._copy);
       document.removeEventListener('paste', this._paste);
       window.removeEventListener('scroll', this._scrollClose, true);
-      clearInterval(this._tick); clearTimeout(this._ct); clearTimeout(this._xt); clearTimeout(this._tt);
+      clearInterval(this._tick); clearTimeout(this._ct); clearTimeout(this._xt); clearTimeout(this._tt); clearTimeout(this._showT); clearTimeout(this._hideT);
     }
 
     // ---------- writes ----------
@@ -1070,9 +1088,11 @@
       else this.setState({ focus: d });
     }
     // Opens the details popover next to `el`, on its right if there is room, else on its left, else below.
-    openPreview(kind, id, el) {
+    // `sticky` (opened by a click) keeps it open when the mouse moves away; hover previews close on leave.
+    openPreview(kind, id, el, sticky) {
+      clearTimeout(this._showT); clearTimeout(this._hideT);
       var r = el.getBoundingClientRect(), W = 304, vw = window.innerWidth, vh = window.innerHeight;
-      var pv = { kind: kind, id: id, side: 'right', left: r.right + 12 };
+      var pv = { kind: kind, id: id, sticky: !!sticky, side: 'right', left: r.right + 12 };
       if (pv.left + W > vw - 8) { pv.side = 'left'; pv.left = r.left - W - 12; }
       if (pv.left < 8) {
         pv.side = 'below'; pv.left = Math.max(8, Math.min(vw - W - 8, r.left + r.width / 2 - W / 2)); pv.top = r.bottom + 10;
@@ -1082,6 +1102,24 @@
         pv.arrow = Math.max(14, r.top + r.height / 2 - pv.top);
       }
       this.setState({ preview: pv });
+    }
+    hoverPreview(kind, id, el) {
+      var self = this, cur = this.state.preview;
+      clearTimeout(this._hideT); clearTimeout(this._showT);
+      if (this.state.drag || this.state.reorder) return;
+      if (cur && cur.kind === kind && cur.id === id) return;
+      if (cur && cur.sticky) return; // a clicked preview stays until dismissed
+      this._showT = setTimeout(function () {
+        if (!self.state.drag && el.isConnected) self.openPreview(kind, id, el, false);
+      }, cur ? 80 : 260);
+    }
+    leavePreview() {
+      var self = this;
+      clearTimeout(this._showT); clearTimeout(this._hideT);
+      this._hideT = setTimeout(function () {
+        var pv = self.state.preview;
+        if (pv && !pv.sticky && !self.popHovered) self.setState({ preview: null });
+      }, 220);
     }
 
     // ---------- keyboard and clipboard ----------
@@ -1645,8 +1683,8 @@
         : view === 'year' ? String(s.yearAnchor || U.fromIso(today).getFullYear())
         : MON[a0.getMonth()] + ' ' + a0.getDate() + ' – ' + MON[a1.getMonth()] + ' ' + a1.getDate() + ', ' + a1.getFullYear();
       var unit = view === 'week' ? 'week' : view;
-      var hints = view === 'month' ? [['Click', ' a step or bar for details'], ['Drag', ' a step to another day'], ['Click a day', ' for its note']]
-        : view === 'year' ? [['Click a day', ' to open its month'], ['Click an experiment', ' for its progress'], ['← →', ' change year']]
+      var hints = view === 'month' ? [['Hover', ' a step or bar for details'], ['Drag', ' a step to another day'], ['Click a day', ' for its note']]
+        : view === 'year' ? [['Click a day', ' to open its month'], ['Hover an experiment', ' for its progress'], ['← →', ' change year']]
         : [['Drag', ' a plan to move it'], [MOD + 'C ' + MOD + 'V', ' to copy'], ['Shift-click', ' to select several'], ['Double-click', ' to edit or delete']];
 
       return h('div', { className: 'rm-app rm-root' },
